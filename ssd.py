@@ -148,5 +148,15 @@ class SSD:
         # make sure everything is floats so the system doesnt come crashing down.
         return [float(x) for x in aspect_ratios]
 
+    def fit_model(self, ssd_generator, epochs, batch_size, callbacks=None):
+        self.model.fit_generator(ssd_generator.generate(True),
+                                 steps_per_epoch=int(ssd_generator.train_batches / batch_size),
+                                 epochs=epochs,
+                                 verbose=1,
+                                 callbacks=callbacks,
+                                 validation_data=ssd_generator.generate(False),
+                                 validation_steps=int(ssd_generator.val_batches / batch_size),
+                                 workers=1)
+
     def get_layer_output(self, layer_name):
         return self.model.get_layer(layer_name).output
