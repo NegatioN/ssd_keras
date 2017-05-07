@@ -1,290 +1,167 @@
-"""Keras implementation of SSD."""
+from __future__ import division, print_function
 
-import keras.backend as K
-from keras.layers import Activation
-from keras.layers import AtrousConvolution2D
-from keras.layers import Convolution2D
-from keras.layers import Dense
-from keras.layers import Flatten
-from keras.layers import GlobalAveragePooling2D
-from keras.layers import Input
-from keras.layers import MaxPooling2D
-from keras.layers import merge
-from keras.layers import Reshape
-from keras.layers import ZeroPadding2D
 from keras.models import Model
+from keras.layers import merge, Reshape, Activation, Input
+from keras.layers.core import Flatten
+from keras.layers.convolutional import Convolution2D, MaxPooling2D, ZeroPadding2D, AtrousConvolution2D
+import keras.backend as K
+import numpy as np
 
-from ssd_layers import Normalize
-from ssd_layers import PriorBox
+from ssd_layers import PriorBox, Normalize
+import vgg16
 
 
-def SSD300(input_shape, num_classes=21):
-    """SSD300 architecture.
+class SSD:
+    """SSD with a better overview"""
+    def __init__(self, size=(300, 300), num_classes=80):
+        self.mlocs, self.mconf, self.mboxes = [], [], []
+        self.size = size
+        self.num_classes = num_classes + 1  # extra class used to infer positive or negative loss at training-time.
+        self.model = self.create(size=size)
 
-    # Arguments
-        input_shape: Shape of the input image,
-            expected to be either (300, 300, 3) or (3, 300, 300)(not tested).
-        num_classes: Number of classes including background.
+    def create(self, size):
+        # VGG16 base
+        vgg = vgg16.VGG()
+        input_shape = size + (3,) if K.backend() == 'tensorflow' else (3,) + size
+        inp = Input(shape=input_shape, name="inp")
 
-    # References
-        https://arxiv.org/abs/1512.02325
-    """
-    net = {}
-    # Block 1
-    input_tensor = input_tensor = Input(shape=input_shape)
-    img_size = (input_shape[1], input_shape[0])
-    net['input'] = input_tensor
-    net['conv1_1'] = Convolution2D(64, 3, 3,
-                                   activation='relu',
-                                   border_mode='same',
-                                   name='conv1_1')(net['input'])
-    net['conv1_2'] = Convolution2D(64, 3, 3,
-                                   activation='relu',
-                                   border_mode='same',
-                                   name='conv1_2')(net['conv1_1'])
-    net['pool1'] = MaxPooling2D((2, 2), strides=(2, 2), border_mode='same',
-                                name='pool1')(net['conv1_2'])
-    # Block 2
-    net['conv2_1'] = Convolution2D(128, 3, 3,
-                                   activation='relu',
-                                   border_mode='same',
-                                   name='conv2_1')(net['pool1'])
-    net['conv2_2'] = Convolution2D(128, 3, 3,
-                                   activation='relu',
-                                   border_mode='same',
-                                   name='conv2_2')(net['conv2_1'])
-    net['pool2'] = MaxPooling2D((2, 2), strides=(2, 2), border_mode='same',
-                                name='pool2')(net['conv2_2'])
-    # Block 3
-    net['conv3_1'] = Convolution2D(256, 3, 3,
-                                   activation='relu',
-                                   border_mode='same',
-                                   name='conv3_1')(net['pool2'])
-    net['conv3_2'] = Convolution2D(256, 3, 3,
-                                   activation='relu',
-                                   border_mode='same',
-                                   name='conv3_2')(net['conv3_1'])
-    net['conv3_3'] = Convolution2D(256, 3, 3,
-                                   activation='relu',
-                                   border_mode='same',
-                                   name='conv3_3')(net['conv3_2'])
-    net['pool3'] = MaxPooling2D((2, 2), strides=(2, 2), border_mode='same',
-                                name='pool3')(net['conv3_3'])
-    # Block 4
-    net['conv4_1'] = Convolution2D(512, 3, 3,
-                                   activation='relu',
-                                   border_mode='same',
-                                   name='conv4_1')(net['pool3'])
-    net['conv4_2'] = Convolution2D(512, 3, 3,
-                                   activation='relu',
-                                   border_mode='same',
-                                   name='conv4_2')(net['conv4_1'])
-    net['conv4_3'] = Convolution2D(512, 3, 3,
-                                   activation='relu',
-                                   border_mode='same',
-                                   name='conv4_3')(net['conv4_2'])
-    net['pool4'] = MaxPooling2D((2, 2), strides=(2, 2), border_mode='same',
-                                name='pool4')(net['conv4_3'])
-    # Block 5
-    net['conv5_1'] = Convolution2D(512, 3, 3,
-                                   activation='relu',
-                                   border_mode='same',
-                                   name='conv5_1')(net['pool4'])
-    net['conv5_2'] = Convolution2D(512, 3, 3,
-                                   activation='relu',
-                                   border_mode='same',
-                                   name='conv5_2')(net['conv5_1'])
-    net['conv5_3'] = Convolution2D(512, 3, 3,
-                                   activation='relu',
-                                   border_mode='same',
-                                   name='conv5_3')(net['conv5_2'])
-    net['pool5'] = MaxPooling2D((3, 3), strides=(1, 1), border_mode='same',
-                                name='pool5')(net['conv5_3'])
-    # FC6
-    net['fc6'] = AtrousConvolution2D(1024, 3, 3, atrous_rate=(6, 6),
-                                     activation='relu', border_mode='same',
-                                     name='fc6')(net['pool5'])
-    # x = Dropout(0.5, name='drop6')(x)
-    # FC7
-    net['fc7'] = Convolution2D(1024, 1, 1, activation='relu',
-                               border_mode='same', name='fc7')(net['fc6'])
-    # x = Dropout(0.5, name='drop7')(x)
-    # Block 6
-    net['conv6_1'] = Convolution2D(256, 1, 1, activation='relu',
-                                   border_mode='same',
-                                   name='conv6_1')(net['fc7'])
-    net['conv6_2'] = Convolution2D(512, 3, 3, subsample=(2, 2),
-                                   activation='relu', border_mode='same',
-                                   name='conv6_2')(net['conv6_1'])
-    # Block 7
-    net['conv7_1'] = Convolution2D(128, 1, 1, activation='relu',
-                                   border_mode='same',
-                                   name='conv7_1')(net['conv6_2'])
-    net['conv7_2'] = ZeroPadding2D()(net['conv7_1'])
-    net['conv7_2'] = Convolution2D(256, 3, 3, subsample=(2, 2),
-                                   activation='relu', border_mode='valid',
-                                   name='conv7_2')(net['conv7_2'])
-    # Block 8
-    net['conv8_1'] = Convolution2D(128, 1, 1, activation='relu',
-                                   border_mode='same',
-                                   name='conv8_1')(net['conv7_2'])
-    net['conv8_2'] = Convolution2D(256, 3, 3, subsample=(2, 2),
-                                   activation='relu', border_mode='same',
-                                   name='conv8_2')(net['conv8_1'])
-    # Last Pool
-    net['pool6'] = GlobalAveragePooling2D(name='pool6')(net['conv8_2'])
-    # Prediction from conv4_3
-    net['conv4_3_norm'] = Normalize(20, name='conv4_3_norm')(net['conv4_3'])
-    num_priors = 3
-    x = Convolution2D(num_priors * 4, 3, 3, border_mode='same',
-                      name='conv4_3_norm_mbox_loc')(net['conv4_3_norm'])
-    net['conv4_3_norm_mbox_loc'] = x
-    flatten = Flatten(name='conv4_3_norm_mbox_loc_flat')
-    net['conv4_3_norm_mbox_loc_flat'] = flatten(net['conv4_3_norm_mbox_loc'])
-    name = 'conv4_3_norm_mbox_conf'
-    if num_classes != 21:
-        name += '_{}'.format(num_classes)
-    x = Convolution2D(num_priors * num_classes, 3, 3, border_mode='same',
-                      name=name)(net['conv4_3_norm'])
-    net['conv4_3_norm_mbox_conf'] = x
-    flatten = Flatten(name='conv4_3_norm_mbox_conf_flat')
-    net['conv4_3_norm_mbox_conf_flat'] = flatten(net['conv4_3_norm_mbox_conf'])
-    priorbox = PriorBox(img_size, 30.0, aspect_ratios=[2],
-                        variances=[0.1, 0.1, 0.2, 0.2],
-                        name='conv4_3_norm_mbox_priorbox')
-    net['conv4_3_norm_mbox_priorbox'] = priorbox(net['conv4_3_norm'])
-    # Prediction from fc7
-    num_priors = 6
-    net['fc7_mbox_loc'] = Convolution2D(num_priors * 4, 3, 3,
-                                        border_mode='same',
-                                        name='fc7_mbox_loc')(net['fc7'])
-    flatten = Flatten(name='fc7_mbox_loc_flat')
-    net['fc7_mbox_loc_flat'] = flatten(net['fc7_mbox_loc'])
-    name = 'fc7_mbox_conf'
-    if num_classes != 21:
-        name += '_{}'.format(num_classes)
-    net['fc7_mbox_conf'] = Convolution2D(num_priors * num_classes, 3, 3,
-                                         border_mode='same',
-                                         name=name)(net['fc7'])
-    flatten = Flatten(name='fc7_mbox_conf_flat')
-    net['fc7_mbox_conf_flat'] = flatten(net['fc7_mbox_conf'])
-    priorbox = PriorBox(img_size, 60.0, max_size=114.0, aspect_ratios=[2, 3],
-                        variances=[0.1, 0.1, 0.2, 0.2],
-                        name='fc7_mbox_priorbox')
-    net['fc7_mbox_priorbox'] = priorbox(net['fc7'])
-    # Prediction from conv6_2
-    num_priors = 6
-    x = Convolution2D(num_priors * 4, 3, 3, border_mode='same',
-                      name='conv6_2_mbox_loc')(net['conv6_2'])
-    net['conv6_2_mbox_loc'] = x
-    flatten = Flatten(name='conv6_2_mbox_loc_flat')
-    net['conv6_2_mbox_loc_flat'] = flatten(net['conv6_2_mbox_loc'])
-    name = 'conv6_2_mbox_conf'
-    if num_classes != 21:
-        name += '_{}'.format(num_classes)
-    x = Convolution2D(num_priors * num_classes, 3, 3, border_mode='same',
-                      name=name)(net['conv6_2'])
-    net['conv6_2_mbox_conf'] = x
-    flatten = Flatten(name='conv6_2_mbox_conf_flat')
-    net['conv6_2_mbox_conf_flat'] = flatten(net['conv6_2_mbox_conf'])
-    priorbox = PriorBox(img_size, 114.0, max_size=168.0, aspect_ratios=[2, 3],
-                        variances=[0.1, 0.1, 0.2, 0.2],
-                        name='conv6_2_mbox_priorbox')
-    net['conv6_2_mbox_priorbox'] = priorbox(net['conv6_2'])
-    # Prediction from conv7_2
-    num_priors = 6
-    x = Convolution2D(num_priors * 4, 3, 3, border_mode='same',
-                      name='conv7_2_mbox_loc')(net['conv7_2'])
-    net['conv7_2_mbox_loc'] = x
-    flatten = Flatten(name='conv7_2_mbox_loc_flat')
-    net['conv7_2_mbox_loc_flat'] = flatten(net['conv7_2_mbox_loc'])
-    name = 'conv7_2_mbox_conf'
-    if num_classes != 21:
-        name += '_{}'.format(num_classes)
-    x = Convolution2D(num_priors * num_classes, 3, 3, border_mode='same',
-                      name=name)(net['conv7_2'])
-    net['conv7_2_mbox_conf'] = x
-    flatten = Flatten(name='conv7_2_mbox_conf_flat')
-    net['conv7_2_mbox_conf_flat'] = flatten(net['conv7_2_mbox_conf'])
-    priorbox = PriorBox(img_size, 168.0, max_size=222.0, aspect_ratios=[2, 3],
-                        variances=[0.1, 0.1, 0.2, 0.2],
-                        name='conv7_2_mbox_priorbox')
-    net['conv7_2_mbox_priorbox'] = priorbox(net['conv7_2'])
-    # Prediction from conv8_2
-    num_priors = 6
-    x = Convolution2D(num_priors * 4, 3, 3, border_mode='same',
-                      name='conv8_2_mbox_loc')(net['conv8_2'])
-    net['conv8_2_mbox_loc'] = x
-    flatten = Flatten(name='conv8_2_mbox_loc_flat')
-    net['conv8_2_mbox_loc_flat'] = flatten(net['conv8_2_mbox_loc'])
-    name = 'conv8_2_mbox_conf'
-    if num_classes != 21:
-        name += '_{}'.format(num_classes)
-    x = Convolution2D(num_priors * num_classes, 3, 3, border_mode='same',
-                      name=name)(net['conv8_2'])
-    net['conv8_2_mbox_conf'] = x
-    flatten = Flatten(name='conv8_2_mbox_conf_flat')
-    net['conv8_2_mbox_conf_flat'] = flatten(net['conv8_2_mbox_conf'])
-    priorbox = PriorBox(img_size, 222.0, max_size=276.0, aspect_ratios=[2, 3],
-                        variances=[0.1, 0.1, 0.2, 0.2],
-                        name='conv8_2_mbox_priorbox')
-    net['conv8_2_mbox_priorbox'] = priorbox(net['conv8_2'])
-    # Prediction from pool6
-    num_priors = 6
-    x = Dense(num_priors * 4, name='pool6_mbox_loc_flat')(net['pool6'])
-    net['pool6_mbox_loc_flat'] = x
-    name = 'pool6_mbox_conf_flat'
-    if num_classes != 21:
-        name += '_{}'.format(num_classes)
-    x = Dense(num_priors * num_classes, name=name)(net['pool6'])
-    net['pool6_mbox_conf_flat'] = x
-    priorbox = PriorBox(img_size, 276.0, max_size=330.0, aspect_ratios=[2, 3],
-                        variances=[0.1, 0.1, 0.2, 0.2],
-                        name='pool6_mbox_priorbox')
-    if K.image_dim_ordering() == 'tf':
-        target_shape = (1, 1, 256)
-    else:
-        target_shape = (256, 1, 1)
-    net['pool6_reshaped'] = Reshape(target_shape,
-                                    name='pool6_reshaped')(net['pool6'])
-    net['pool6_mbox_priorbox'] = priorbox(net['pool6_reshaped'])
-    # Gather all predictions
-    net['mbox_loc'] = merge([net['conv4_3_norm_mbox_loc_flat'],
-                             net['fc7_mbox_loc_flat'],
-                             net['conv6_2_mbox_loc_flat'],
-                             net['conv7_2_mbox_loc_flat'],
-                             net['conv8_2_mbox_loc_flat'],
-                             net['pool6_mbox_loc_flat']],
-                            mode='concat', concat_axis=1, name='mbox_loc')
-    net['mbox_conf'] = merge([net['conv4_3_norm_mbox_conf_flat'],
-                              net['fc7_mbox_conf_flat'],
-                              net['conv6_2_mbox_conf_flat'],
-                              net['conv7_2_mbox_conf_flat'],
-                              net['conv8_2_mbox_conf_flat'],
-                              net['pool6_mbox_conf_flat']],
-                             mode='concat', concat_axis=1, name='mbox_conf')
-    net['mbox_priorbox'] = merge([net['conv4_3_norm_mbox_priorbox'],
-                                  net['fc7_mbox_priorbox'],
-                                  net['conv6_2_mbox_priorbox'],
-                                  net['conv7_2_mbox_priorbox'],
-                                  net['conv8_2_mbox_priorbox'],
-                                  net['pool6_mbox_priorbox']],
-                                 mode='concat', concat_axis=1,
-                                 name='mbox_priorbox')
-    if hasattr(net['mbox_loc'], '_keras_shape'):
-        num_boxes = net['mbox_loc']._keras_shape[-1] // 4
-    elif hasattr(net['mbox_loc'], 'int_shape'):
-        num_boxes = K.int_shape(net['mbox_loc'])[-1] // 4
-    net['mbox_loc'] = Reshape((num_boxes, 4),
-                              name='mbox_loc_final')(net['mbox_loc'])
-    net['mbox_conf'] = Reshape((num_boxes, num_classes),
-                               name='mbox_conf_logits')(net['mbox_conf'])
-    net['mbox_conf'] = Activation('softmax',
-                                  name='mbox_conf_final')(net['mbox_conf'])
-    net['predictions'] = merge([net['mbox_loc'],
-                               net['mbox_conf'],
-                               net['mbox_priorbox']],
-                               mode='concat', concat_axis=2,
-                               name='predictions')
-    model = Model(net['input'], net['predictions'])
-    return model
+        x = vgg.FuncConvBlock(inp, 2, 64)
+        x = vgg.FuncConvBlock(x, 2, 128)
+        x = vgg.FuncConvBlock(x, 3, 256)
+        conv4 = vgg.FuncConvBlock(x, 3, 512, max_pool=False)
+        x = MaxPooling2D((2, 2), strides=(2, 2), border_mode='same', name='pool4')(conv4)
+        base_model = vgg.FuncConvBlock(x, 3, 512, max_pool=False)
+
+        conv4_3_norm = Normalize(20, name='conv4_3_norm')(conv4)
+
+        # SSD
+        fc6 = AtrousConvolution2D(nb_filter=1024,
+                                  nb_col=3,
+                                  nb_row=3,
+                                  atrous_rate=(6, 6),
+                                  activation='relu',
+                                  border_mode='same',
+                                  name='fc6')(base_model)
+        fc7 = Convolution2D(nb_filter=1024, nb_col=1, nb_row=1, activation='relu', border_mode='same', name='fc7')(fc6)
+        conv6_2 = self.ConvSSDBlock(fc7, name="conv6", filters=256, stride=(2, 2))
+        conv7_2 = self.ConvSSDBlock(conv6_2, name="conv7", filters=128, stride=(2, 2))
+        conv8_2 = self.ConvSSDBlock(conv7_2, name="conv8", filters=128, stride=(2, 2))
+        conv9_2 = self.ConvSSDBlock(conv8_2, name="conv9", filters=128, stride=(2, 2))
+        conv10_2 = self.ConvSSDBlock(conv9_2, name="conv10", filters=128, stride=(1, 1), filter_size=4)
+
+        model = Model(inp, [conv10_2, conv4_3_norm])  # Temporary model to avoid passing all layers to pred_blocks
+
+        # SSD Prediction Blocks
+        self.add_prediction_blocks(model)
+
+        return self.finalize_model(inp)
+
+
+    def add_prediction_blocks(self, model):
+        # Clear list of layers for easy management
+        self.model = model
+        self.mlocs, self.mconf, self.mboxes = [], [], []
+        self.PredictionBlock(k=1, attach_layer_name='conv4_3_norm', aspect_ratios=[1.0, 2.0, 1.0 / 2])
+        self.PredictionBlock(k=2, attach_layer_name='fc7')
+        self.PredictionBlock(k=3, attach_layer_name='conv6_2')
+        self.PredictionBlock(k=4, attach_layer_name='conv7_2')
+        self.PredictionBlock(k=5, attach_layer_name='conv8_2')
+        self.PredictionBlock(k=6, attach_layer_name='conv9_2', aspect_ratios=[1.0, 2.0, 1.0 / 2])
+        self.PredictionBlock(k=7, attach_layer_name='conv10_2', aspect_ratios=[1.0, 2.0, 1.0 / 2])
+
+
+    def finalize_model(self, in_layer):
+        merged_mlocs = merge(self.mlocs, mode='concat', concat_axis=1, name='multibox_m_locations')
+        merged_mconf = merge(self.mconf, mode='concat', concat_axis=1, name='multibox_m_confidence')
+        num_boxes = self.num_boxes_in_mlocs(merged_mlocs)
+        logits_mconf = Reshape((num_boxes, self.num_classes), name='multibox_confidence_logits')(merged_mconf)
+        final_mlocs = Reshape((num_boxes, 4), name='multibox_locations_final')(merged_mlocs)
+        final_mboxes = merge(self.mboxes, mode='concat', concat_axis=1, name='multibox_priorbox')
+        final_mconf = Activation('softmax', name='multibox_confidence_final')(logits_mconf)
+
+        prediction_output = merge([final_mlocs, final_mconf, final_mboxes], mode='concat', concat_axis=2, name='predictions')
+        return Model(in_layer, prediction_output)
+
+    '''
+        A block we connect to a layer to generate some predictions about which bounding-boxes might fit
+        Arguments
+            attach_layer_name: layer to attach the PredictionBlock to
+            k: Number in the sequence of Prediction-blocks. Used to scale boxes for the layer.
+            aspect_ratio: Which aspect-ratios to include for the boxes of this layer.
+    '''
+    def PredictionBlock(self, attach_layer_name, k, aspect_ratios=None, border_mode='same'):
+        aspect_ratios = self.fix_aspect_ratios(aspect_ratios)
+        # aspect_ratio 1 is a special case, and is handled twice, so we need to count it twice.
+        num_priors = len(aspect_ratios) + 1 if 1 in aspect_ratios else len(aspect_ratios)
+        # Classification-layer
+        # The conf and loc parts make up the 3*3(num_prior*(Classes+4)) we see in the paper.
+        attach_layer = self.get_layer_output(attach_layer_name)
+        x = Convolution2D(nb_filter=num_priors * self.num_classes, nb_col=3, nb_row=3, border_mode=border_mode,
+                          name='{}_mbox_conf'.format(attach_layer_name))(attach_layer)
+        flatten = Flatten(name=("{}_mbox_conf_flat".format(attach_layer_name)))
+        self.mconf.append(flatten(x))
+        x = Convolution2D(nb_filter=num_priors * 4, nb_col=3, nb_row=3, border_mode=border_mode,
+                          name='{}_mbox_loc'.format(attach_layer_name))(attach_layer)
+        flatten = Flatten(name=("{}_mbox_loc_flat".format(attach_layer_name)))
+        self.mlocs.append(flatten(x))
+
+        ## Make PriorBox
+        self.mboxes.append(PriorBox(self.size, k=k, aspect_ratios=aspect_ratios, variances=[0.1, 0.1, 0.2, 0.2],
+                                    name=('{}_mbox_priorbox'.format(attach_layer_name)))(attach_layer))
+
+    @staticmethod
+    def ConvSSDBlock(layer, name, filters, stride=(2, 2), filter_size=3):
+        x = Convolution2D(nb_filter=filters,
+                          nb_row=1,
+                          nb_col=1,
+                          subsample=(1,1),
+                          activation='relu',
+                          border_mode='same',
+                          name="{}_1".format(name))(layer)
+        return Convolution2D(nb_filter=filters * 2,
+                             nb_row=filter_size,
+                             nb_col=filter_size,
+                             subsample=stride,
+                             activation='relu',
+                             border_mode='same',
+                             name="{}_2".format(name))(x)
+
+    def load_weights_finetune(self, num_classes, weight_loc, freeze_except_priors=True):
+        self.model.load_weights(weight_loc)
+        self.finetune(num_classes, freeze_except_priors)
+
+    def finetune(self, num_classes, freeze_except_priors):
+        self.num_classes = num_classes + 1  # extra class used to infer positive or negative loss at training-time.
+        in_layer = self.model.get_layer("inp").input
+        self.add_prediction_blocks(self.model)
+        model = self.finalize_model(in_layer)
+        if freeze_except_priors:
+            self.freeze_model(model, 33)  # Freeze after SSD Convolutional layers
+        else:
+            self.freeze_model(model, 22)  # Freeze after VGG model-layers
+        self.model = model
+
+    @staticmethod
+    def freeze_model(model, num_freeze_layers):
+        for layer in model.layers:
+            layer.trainable = True
+        for i, layer in enumerate(model.layers):
+            if i < num_freeze_layers:
+                layer.trainable = False
+
+    @staticmethod
+    def num_boxes_in_mlocs(merged_mbox_mlocs):
+        if hasattr(merged_mbox_mlocs, '_keras_shape'):
+            return merged_mbox_mlocs._keras_shape[-1] // 4
+        elif hasattr(merged_mbox_mlocs, 'int_shape'):
+            return K.int_shape(merged_mbox_mlocs)[-1] // 4
+
+    @staticmethod
+    def fix_aspect_ratios(aspect_ratios):
+        if aspect_ratios is None:
+            aspect_ratios = [1, 2, 3, 1.0 / 2, 1.0 / 3]  # default aspect-ratios in the paper.
+        # make sure everything is floats so the system doesnt come crashing down.
+        return [float(x) for x in aspect_ratios]
+
+    def get_layer_output(self, layer_name):
+        return self.model.get_layer(layer_name).output
