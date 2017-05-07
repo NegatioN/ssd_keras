@@ -93,8 +93,7 @@ class PriorBox(Layer):
         self.clip = clip
         super(PriorBox, self).__init__(**kwargs)
 
-    #TODO this seems to change behavior in keras 2.
-    def get_output_shape_for(self, input_shape):
+    def compute_output_shape(self, input_shape):
         num_priors_ = len(self.aspect_ratios) + 1
         layer_width = input_shape[self.waxis]
         layer_height = input_shape[self.haxis]
@@ -118,9 +117,9 @@ class PriorBox(Layer):
                                        box_widths=box_widths,
                                        num_priors=num_priors,
                                        clip=self.clip)
-        return output_stuff(x=x,
-                            prior_boxes=prior_boxes,
-                            variances=self.variances)
+        return reshape_for_output(x=x,
+                                  prior_boxes=prior_boxes,
+                                  variances=self.variances)
 
 
 def box_height_widths(aspect_ratios, step_k):
@@ -149,7 +148,7 @@ def box_height_widths(aspect_ratios, step_k):
     return box_widths, box_heights
 
 
-def output_stuff(x, prior_boxes, variances):
+def reshape_for_output(x, prior_boxes, variances):
     r_variances = reshape_variances(variances, num_boxes=len(prior_boxes))
     prior_boxes = np.concatenate((prior_boxes, r_variances), axis=1)
     keras_tensor = K.variable(prior_boxes)

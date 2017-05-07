@@ -541,8 +541,8 @@ class UnseenImagesGenerator(image.Iterator):
 #Create priors for BBoxUtil to work with, consistent with live model.
 def create_bbox_with_priors(model, num_classes, target_size):
     gen = image.ImageDataGenerator()
-    batches = gen.flow_from_directory("pics", target_size=target_size, class_mode="categorical", shuffle=True, batch_size=1)
+    batches = gen.flow_from_directory("data/temporary", target_size=target_size, class_mode="categorical", shuffle=True, batch_size=1)
 
     model.compile(Adam(lr=0.001), loss= 'categorical_crossentropy', metrics=['accuracy'])
-    priors_format = model.predict_generator(batches, batches.nb_sample)[0, :, -8:]
+    priors_format = model.predict_generator(batches, batches.samples)[0, :, -8:]
     return BBoxUtility(num_classes, priors_format)

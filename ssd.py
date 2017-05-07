@@ -1,11 +1,10 @@
 from __future__ import division, print_function
 
 from keras.models import Model
-from keras.layers import merge, Reshape, Activation, Input
+from keras.layers import Reshape, Activation, Input, concatenate
 from keras.layers.core import Flatten
-from keras.layers.convolutional import Convolution2D, MaxPooling2D, ZeroPadding2D, AtrousConvolution2D
+from keras.layers.convolutional import Conv2D, MaxPooling2D
 import keras.backend as K
-import numpy as np
 
 from ssd_layers import PriorBox, Normalize
 import vgg16
@@ -13,7 +12,8 @@ import vgg16
 
 class SSD:
     """SSD with a better overview"""
-    def __init__(self, size=(300, 300), num_classes=80):
+
+    def __init__(self, size=(512, 512), num_classes=80):
         self.mlocs, self.mconf, self.mboxes = [], [], []
         self.size = size
         self.num_classes = num_classes + 1  # extra class used to infer positive or negative loss at training-time.
@@ -29,20 +29,14 @@ class SSD:
         x = vgg.FuncConvBlock(x, 2, 128)
         x = vgg.FuncConvBlock(x, 3, 256)
         conv4 = vgg.FuncConvBlock(x, 3, 512, max_pool=False)
-        x = MaxPooling2D((2, 2), strides=(2, 2), border_mode='same', name='pool4')(conv4)
+        x = MaxPooling2D((2, 2), strides=(2, 2), padding='same', name='pool4')(conv4)
         base_model = vgg.FuncConvBlock(x, 3, 512, max_pool=False)
 
         conv4_3_norm = Normalize(20, name='conv4_3_norm')(conv4)
 
         # SSD
-        fc6 = AtrousConvolution2D(nb_filter=1024,
-                                  nb_col=3,
-                                  nb_row=3,
-                                  atrous_rate=(6, 6),
-                                  activation='relu',
-                                  border_mode='same',
-                                  name='fc6')(base_model)
-        fc7 = Convolution2D(nb_filter=1024, nb_col=1, nb_row=1, activation='relu', border_mode='same', name='fc7')(fc6)
+        fc6 = Conv2D(filters=1024, kernel_size=3, dilation_rate=6, activation='relu', padding='same', name='fc6')(base_model)
+        fc7 = Conv2D(filters=1024, kernel_size=1, activation='relu', padding='same', name='fc7')(fc6)
         conv6_2 = self.ConvSSDBlock(fc7, name="conv6", filters=256, stride=(2, 2))
         conv7_2 = self.ConvSSDBlock(conv6_2, name="conv7", filters=128, stride=(2, 2))
         conv8_2 = self.ConvSSDBlock(conv7_2, name="conv8", filters=128, stride=(2, 2))
@@ -56,7 +50,6 @@ class SSD:
 
         return self.finalize_model(inp)
 
-
     def add_prediction_blocks(self, model):
         # Clear list of layers for easy management
         self.model = model
@@ -69,17 +62,17 @@ class SSD:
         self.PredictionBlock(k=6, attach_layer_name='conv9_2', aspect_ratios=[1.0, 2.0, 1.0 / 2])
         self.PredictionBlock(k=7, attach_layer_name='conv10_2', aspect_ratios=[1.0, 2.0, 1.0 / 2])
 
-
     def finalize_model(self, in_layer):
-        merged_mlocs = merge(self.mlocs, mode='concat', concat_axis=1, name='multibox_m_locations')
-        merged_mconf = merge(self.mconf, mode='concat', concat_axis=1, name='multibox_m_confidence')
-        num_boxes = self.num_boxes_in_mlocs(merged_mlocs)
+        merged_mlocs = concatenate(self.mlocs, axis=1, name='multibox_m_locations')
+        merged_mconf = concatenate(self.mconf, axis=1, name='multibox_m_confidence')
+        # Get number of boxes in mlocs. Four points per box.
+        num_boxes = self.get_layer_output_shape(merged_mlocs)[-1] // 4
         logits_mconf = Reshape((num_boxes, self.num_classes), name='multibox_confidence_logits')(merged_mconf)
         final_mlocs = Reshape((num_boxes, 4), name='multibox_locations_final')(merged_mlocs)
-        final_mboxes = merge(self.mboxes, mode='concat', concat_axis=1, name='multibox_priorbox')
+        final_mboxes = concatenate(self.mboxes, axis=1, name='multibox_priorbox')
         final_mconf = Activation('softmax', name='multibox_confidence_final')(logits_mconf)
 
-        prediction_output = merge([final_mlocs, final_mconf, final_mboxes], mode='concat', concat_axis=2, name='predictions')
+        prediction_output = concatenate([final_mlocs, final_mconf, final_mboxes], axis=2, name='predictions')
         return Model(in_layer, prediction_output)
 
     '''
@@ -89,19 +82,21 @@ class SSD:
             k: Number in the sequence of Prediction-blocks. Used to scale boxes for the layer.
             aspect_ratio: Which aspect-ratios to include for the boxes of this layer.
     '''
-    def PredictionBlock(self, attach_layer_name, k, aspect_ratios=None, border_mode='same'):
+
+    def PredictionBlock(self, attach_layer_name, k, aspect_ratios=None, padding='same'):
         aspect_ratios = self.fix_aspect_ratios(aspect_ratios)
         # aspect_ratio 1 is a special case, and is handled twice, so we need to count it twice.
         num_priors = len(aspect_ratios) + 1 if 1 in aspect_ratios else len(aspect_ratios)
         # Classification-layer
         # The conf and loc parts make up the 3*3(num_prior*(Classes+4)) we see in the paper.
         attach_layer = self.get_layer_output(attach_layer_name)
-        x = Convolution2D(nb_filter=num_priors * self.num_classes, nb_col=3, nb_row=3, border_mode=border_mode,
-                          name='{}_mbox_conf'.format(attach_layer_name))(attach_layer)
+
+        x = Conv2D(filters=num_priors * self.num_classes, kernel_size=3, padding=padding,
+                   name='{}_mbox_conf'.format(attach_layer_name))(attach_layer)
         flatten = Flatten(name=("{}_mbox_conf_flat".format(attach_layer_name)))
         self.mconf.append(flatten(x))
-        x = Convolution2D(nb_filter=num_priors * 4, nb_col=3, nb_row=3, border_mode=border_mode,
-                          name='{}_mbox_loc'.format(attach_layer_name))(attach_layer)
+        x = Conv2D(filters=num_priors * 4, kernel_size=3, padding=padding,
+                   name='{}_mbox_loc'.format(attach_layer_name))(attach_layer)
         flatten = Flatten(name=("{}_mbox_loc_flat".format(attach_layer_name)))
         self.mlocs.append(flatten(x))
 
@@ -111,20 +106,10 @@ class SSD:
 
     @staticmethod
     def ConvSSDBlock(layer, name, filters, stride=(2, 2), filter_size=3):
-        x = Convolution2D(nb_filter=filters,
-                          nb_row=1,
-                          nb_col=1,
-                          subsample=(1,1),
-                          activation='relu',
-                          border_mode='same',
-                          name="{}_1".format(name))(layer)
-        return Convolution2D(nb_filter=filters * 2,
-                             nb_row=filter_size,
-                             nb_col=filter_size,
-                             subsample=stride,
-                             activation='relu',
-                             border_mode='same',
-                             name="{}_2".format(name))(x)
+        x = Conv2D(filters=filters, kernel_size=1, strides=(1, 1), activation='relu', padding='same',
+                   name="{}_1".format(name))(layer)
+        return Conv2D(filters=filters * 2, kernel_size=filter_size, strides=stride, activation='relu', padding='same',
+                      name="{}_2".format(name))(x)
 
     def load_weights_finetune(self, num_classes, weight_loc, freeze_except_priors=True):
         self.model.load_weights(weight_loc)
@@ -150,11 +135,11 @@ class SSD:
                 layer.trainable = False
 
     @staticmethod
-    def num_boxes_in_mlocs(merged_mbox_mlocs):
-        if hasattr(merged_mbox_mlocs, '_keras_shape'):
-            return merged_mbox_mlocs._keras_shape[-1] // 4
-        elif hasattr(merged_mbox_mlocs, 'int_shape'):
-            return K.int_shape(merged_mbox_mlocs)[-1] // 4
+    def get_layer_output_shape(layer):
+        if hasattr(layer, '_keras_shape'):
+            return layer._keras_shape
+        elif hasattr(layer, 'int_shape'):
+            return K.int_shape(layer)
 
     @staticmethod
     def fix_aspect_ratios(aspect_ratios):
