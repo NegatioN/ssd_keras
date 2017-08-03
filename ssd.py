@@ -54,13 +54,13 @@ class SSD:
         # Clear list of layers for easy management
         self.model = model
         self.mlocs, self.mconf, self.mboxes = [], [], []
-        self.PredictionBlock(k=1, attach_layer_name='conv4_3_norm', aspect_ratios=[1.0, 2.0, 1.0 / 2])
-        self.PredictionBlock(k=2, attach_layer_name='fc7')
-        self.PredictionBlock(k=3, attach_layer_name='conv6_2')
-        self.PredictionBlock(k=4, attach_layer_name='conv7_2')
-        self.PredictionBlock(k=5, attach_layer_name='conv8_2')
-        self.PredictionBlock(k=6, attach_layer_name='conv9_2', aspect_ratios=[1.0, 2.0, 1.0 / 2])
-        self.PredictionBlock(k=7, attach_layer_name='conv10_2', aspect_ratios=[1.0, 2.0, 1.0 / 2])
+        self.PredictionBlock(k=1, min_size=20.48, max_size=51.2, attach_layer_name='conv4_3_norm', smin=0.1, aspect_ratios=[ 2.0, 1.0 / 2])
+        self.PredictionBlock(k=2, min_size=51.2, max_size=133.12, attach_layer_name='fc7')
+        self.PredictionBlock(k=3, min_size=133.12, max_size=215.04, attach_layer_name='conv6_2')
+        self.PredictionBlock(k=4, min_size=215.04, max_size=296.96, attach_layer_name='conv7_2')
+        self.PredictionBlock(k=5, min_size=296.96, max_size=378.88, attach_layer_name='conv8_2')
+        self.PredictionBlock(k=6, min_size=378.88, max_size=460.8, attach_layer_name='conv9_2', aspect_ratios=[ 2.0, 1.0 / 2])
+        self.PredictionBlock(k=7, min_size=460.8, max_size=542.72, attach_layer_name='conv10_2', aspect_ratios=[ 2.0, 1.0 / 2])
 
     def finalize_model(self, in_layer):
         merged_mlocs = concatenate(self.mlocs, axis=1, name='multibox_m_locations')
@@ -83,10 +83,10 @@ class SSD:
             aspect_ratio: Which aspect-ratios to include for the boxes of this layer.
     '''
 
-    def PredictionBlock(self, attach_layer_name, k, aspect_ratios=None, padding='same'):
+    def PredictionBlock(self, attach_layer_name, k, min_size, max_size, smin=0.1, aspect_ratios=None, padding='same'):
         aspect_ratios = self.fix_aspect_ratios(aspect_ratios)
         # aspect_ratio 1 is a special case, and is handled twice, so we need to count it twice.
-        num_priors = len(aspect_ratios) + 1 if 1 in aspect_ratios else len(aspect_ratios)
+        num_priors = len(aspect_ratios) + 1 #if 1 in aspect_ratios else len(aspect_ratios)
         # Classification-layer
         # The conf and loc parts make up the 3*3(num_prior*(Classes+4)) we see in the paper.
         attach_layer = self.get_layer_output(attach_layer_name)
@@ -101,7 +101,7 @@ class SSD:
         self.mlocs.append(flatten(x))
 
         ## Make PriorBox
-        self.mboxes.append(PriorBox(self.size, k=k, aspect_ratios=aspect_ratios, variances=[0.1, 0.1, 0.2, 0.2],
+        self.mboxes.append(PriorBox(self.size, k=k, min_size=min_size, max_size=max_size, smin=smin, aspect_ratios=aspect_ratios, variances=[0.1, 0.1, 0.2, 0.2],
                                     name=('{}_mbox_priorbox'.format(attach_layer_name)))(attach_layer))
 
     @staticmethod
@@ -144,7 +144,7 @@ class SSD:
     @staticmethod
     def fix_aspect_ratios(aspect_ratios):
         if aspect_ratios is None:
-            aspect_ratios = [1, 2, 3, 1.0 / 2, 1.0 / 3]  # default aspect-ratios in the paper.
+            aspect_ratios = [2, 3, 1.0 / 2, 1.0 / 3]  # default aspect-ratios in the paper.
         # make sure everything is floats so the system doesnt come crashing down.
         return [float(x) for x in aspect_ratios]
 

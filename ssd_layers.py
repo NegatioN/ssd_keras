@@ -10,7 +10,6 @@ import logging
 logging.basicConfig()
 logger = logging.getLogger("SSD_LOGGER")
 logger.setLevel(logging.INFO)
-smin = 0.15
 smax = 0.9
 
 
@@ -81,7 +80,7 @@ class PriorBox(Layer):
         https://arxiv.org/abs/1512.02325
     """
 
-    def __init__(self, img_size, k, aspect_ratios, variances=[0.1], clip=True, **kwargs):
+    def __init__(self, img_size, k, min_size, max_size, aspect_ratios, smin=0.15, variances=[0.1], clip=False, **kwargs):
         self.k = k
         if K.image_dim_ordering() == 'tf':
             self.waxis, self.haxis = 2, 1
@@ -91,6 +90,10 @@ class PriorBox(Layer):
         self.aspect_ratios = aspect_ratios
         self.variances = np.array(variances)
         self.clip = clip
+        self.smin = smin
+        self.min_size = min_size
+        self.max_size = max_size
+
         super(PriorBox, self).__init__(**kwargs)
 
     def compute_output_shape(self, input_shape):
@@ -105,14 +108,16 @@ class PriorBox(Layer):
         logger.debug(".call input-shape: {}".format(input_shape))
         layer_width = input_shape[self.waxis]
         layer_height = input_shape[self.haxis]
-        step = step_k(self.k)
+        step = step_k(self.smin, self.k)
         # because we add special handling for ratio 1 TODO fix pretty
         num_priors = len(self.aspect_ratios) + 1 if 1.0 in self.aspect_ratios else len(self.aspect_ratios)
 
-        box_widths, box_heights = box_height_widths(self.aspect_ratios, step)
+        box_widths, box_heights = box_height_widths(self.aspect_ratios, self.min_size, self.max_size)
         prior_boxes = make_prior_boxes(layer_width=layer_width,
                                        layer_height=layer_height,
                                        step=step,
+                                       ratios=self.aspect_ratios,
+                                       sizes=(self.min_size, self.max_size),
                                        box_heights=box_heights,
                                        box_widths=box_widths,
                                        num_priors=num_priors,
@@ -121,8 +126,8 @@ class PriorBox(Layer):
                                   prior_boxes=prior_boxes,
                                   variances=self.variances)
 
-
-def box_height_widths(aspect_ratios, step_k):
+# Boxes somehow need scaling with image_size at current layer. Capitalize and implement like rykov?
+def box_height_widths(aspect_ratios, min_size, max_size):
     box_widths, box_heights = [], []
 
     checker = dict(zip(aspect_ratios, range(len(aspect_ratios))))
@@ -134,17 +139,19 @@ def box_height_widths(aspect_ratios, step_k):
             # Special casing for aspect-ratio 1, as stated on page 6
             # in the paper this says sqrt(step_k * step_k + 1), but the impl differs
             # https://github.com/weiliu89/caffe/blob/ssd/src/caffe/layers/prior_box_layer.cpp#L165
-            box_heights.append(np.sqrt(step_k))
-            box_widths.append(np.sqrt(step_k))
-            box_heights.append(np.sqrt(step_k * smax))
-            box_widths.append(np.sqrt(step_k * smax))
+            box_widths.append(min_size)
+            box_heights.append(min_size)
+            box_widths.append(np.sqrt(min_size * max_size))
+            box_heights.append(np.sqrt(min_size * max_size))
         else:
-            box_widths.append(step_k * np.sqrt(ar))
-            box_heights.append(step_k / np.sqrt(ar))
+            box_widths.append(min_size * np.sqrt(ar))
+            box_heights.append(min_size / np.sqrt(ar))
+            h[i+di] = sizes[0] / img_shape[0] / np.sqrt(r)
+    w[i+di] = sizes[0] / img_shape[1] * np.sqrt(r)
 
     # Half these since we take steps in both directions later. We are kinda using a "radius" here. Refactor?
-    box_widths = 0.25 * np.array(box_widths)
-    box_heights = 0.25 * np.array(box_heights)
+    box_widths = 0.5 * np.array(box_widths)
+    box_heights = 0.5 * np.array(box_heights)
     return box_widths, box_heights
 
 
@@ -157,10 +164,16 @@ def reshape_for_output(x, prior_boxes, variances):
     return prior_boxes_tensor
 
 
-def box_centers(layer_width, layer_height, step):
-    logger.debug("box_centers: Step={}, layer_height={}, layer_width={}".format(step, layer_height, layer_width))
-    linx = np.linspace((0.5 * step) / layer_width, (layer_width - 0.5 * step) / layer_width, layer_width)
-    liny = np.linspace((0.5 * step) / layer_height, (layer_height - 0.5 * step) / layer_height, layer_height)
+def box_centers(layer_width, layer_height, image_size=512.0):
+    logger.debug("box_centers:  layer_height={}, layer_width={}".format(layer_height, layer_width))
+    step_x = image_size / layer_width
+    step_y = image_size / layer_height
+    #linx = np.linspace((0.5 * step) / layer_width, (layer_width - 0.5 * step) / layer_width, layer_width)
+    #liny = np.linspace((0.5 * step) / layer_height, (layer_height - 0.5 * step) / layer_height, layer_height)
+    linx = np.linspace(0.5 * step_x, image_size - 0.5 * step_x,
+                       layer_width)
+    liny = np.linspace(0.5 * step_y, image_size - 0.5 * step_y,
+                       layer_height)
     logger.debug("Box-centers Lin-x: {}".format(linx))
     logger.debug("Box-centers Lin-y: {}".format(liny))
     centers_x, centers_y = np.meshgrid(linx, liny)
@@ -169,19 +182,22 @@ def box_centers(layer_width, layer_height, step):
     return centers_x, centers_y
 
 
-def make_prior_boxes(layer_height, layer_width, step, box_heights, box_widths, num_priors, clip):
-    centers_x, centers_y = box_centers(layer_height=layer_height,
-                                       layer_width=layer_width,
-                                       step=step)
+def make_prior_boxes(layer_height, layer_width, sizes, step, ratios, box_heights, box_widths, num_priors, clip):
+    #centers_x, centers_y = box_centers(layer_height=layer_height,
+    #                                   layer_width=layer_width)
+    print("old:", box_widths)
+    centers_y, centers_x, heights, widths = ssd_anchor_one_layer((512, 512), (layer_height, layer_width), sizes, ratios, step)
     # define xmin, ymin, xmax, ymax of prior boxes
     prior_boxes = np.concatenate((centers_x, centers_y), axis=1)
     logger.debug("Prior_Boxes centers: {}".format(prior_boxes))
     logger.debug("Prior_Boxes: width={} heights={}".format(box_widths, box_heights))
     prior_boxes = np.tile(prior_boxes, (1, 2 * num_priors))
-    prior_boxes[:, 0::4] -= box_widths
-    prior_boxes[:, 1::4] -= box_heights
-    prior_boxes[:, 2::4] += box_widths
-    prior_boxes[:, 3::4] += box_heights
+    prior_boxes[:, 0::4] -= widths
+    prior_boxes[:, 1::4] -= heights
+    prior_boxes[:, 2::4] += widths
+    prior_boxes[:, 3::4] += heights
+    prior_boxes[:, ::2] /= 512.0
+    prior_boxes[:, 1::2] /= 512.0
     logger.debug("Prior_Boxes:\n{}".format(prior_boxes))
     prior_boxes = prior_boxes.reshape(-1, 4)
     if clip:
@@ -204,7 +220,56 @@ def find_input_shape(x):
         return K.int_shape(x)
 
 
+def ssd_anchor_one_layer(img_shape,
+                         feat_shape,
+                         sizes,
+                         ratios,
+                         step,
+                         offset=0.5,
+                         dtype=np.float32):
+    """Computer SSD default anchor boxes for one feature layer.
+    Determine the relative position grid of the centers, and the relative
+    width and height.
+    Arguments:
+      feat_shape: Feature shape, used for computing relative position grids;
+      size: Absolute reference sizes;
+      ratios: Ratios to use on these features;
+      img_shape: Image shape, used for computing height, width relatively to the
+        former;
+      offset: Grid offset.
+    Return:
+      y, x, h, w: Relative x and y grids, and height and width.
+    """
+    # Weird SSD-Caffe computation using steps values...
+    y, x = np.mgrid[0:feat_shape[0], 0:feat_shape[1]]
+    y = (y.astype(dtype) + offset) * step / img_shape[0]
+    x = (x.astype(dtype) + offset) * step / img_shape[1]
+
+    # Expand dims to support easy broadcasting.
+    y = np.expand_dims(y, axis=-1)
+    x = np.expand_dims(x, axis=-1)
+
+    # Compute relative height and width.
+    # Tries to follow the original implementation of SSD for the order.
+    num_anchors = len(sizes) + len(ratios)
+    h = np.zeros((num_anchors, ), dtype=dtype)
+    w = np.zeros((num_anchors, ), dtype=dtype)
+    # Add first anchor boxes with ratio=1.
+    h[0] = sizes[0] / img_shape[0]
+    w[0] = sizes[0] / img_shape[1]
+    di = 1
+    if len(sizes) > 1:
+        h[1] = np.sqrt(sizes[0] * sizes[1]) / img_shape[0]
+        w[1] = np.sqrt(sizes[0] * sizes[1]) / img_shape[1]
+        di += 1
+    for i, r in enumerate(ratios):
+        h[i+di] = sizes[0] / img_shape[0] / np.sqrt(r)
+        w[i+di] = sizes[0] / img_shape[1] * np.sqrt(r)
+    print("New:", w)
+    return y, x, h, w
+
+
 # Change m if you add more PredictionBlocks to the model.
-def step_k(k):
+def step_k(smin, k):
     m = 7.0
-    return smin + (smax - smin) * (k - 1.0) / (m - 1.0)  # equation 4
+    return smin + (smax - smin) * (k - 1.0) / (m - 2.0)  # equation 4
